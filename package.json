@@ -1,0 +1,57 @@
+{
+  "name": "@dsh-external/dsh-graphflow",
+  "version": "0.1.0",
+  "description": "Declarative graph orchestration for DeepSeek Harness: nodes, edges, typed state, conditional routing, and resumable checkpoints",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "dependencies": {
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.1.8",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.8"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "graph",
+    "orchestration",
+    "state-machine",
+    "multi-agent",
+    "checkpoint",
+    "cordis"
+  ]
+}

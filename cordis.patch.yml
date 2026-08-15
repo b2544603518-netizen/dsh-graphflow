@@ -1,0 +1,4 @@
+# One installable bundle row mounts the host-side graph orchestration engine.
+- insert:
+    - id: dsh-graphflow
+      name: '@dsh-external/dsh-graphflow'
