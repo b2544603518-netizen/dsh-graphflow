@@ -18,7 +18,7 @@ DSH's workflow seam runs a *model-written script* that fans out subagents, but i
 ## Install
 
 ```bash
-dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.2.0
+dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.2.1
 ```
 
 The repository ships its built Host bundle, so a Git install runs no build script.
@@ -173,6 +173,14 @@ No configuration is required. `ctx.get('subagents')`, `ctx.get('agent')`, and `c
 - Time-travel UI and checkpoint branching (`resume` re-runs linearly; `listCheckpoints` is read-only).
 - A model-facing graph tool (DSH already ships `workflow`).
 - Long-term memory stores and span/processor observability stacks (DSH's session persistence, storage domains, and approval stack already cover those).
+
+## Known limits & edges
+
+- **A `failed` or `cancelled` run returns `checkpointId: null`.** Only successful node boundaries are checkpointed. After a node throws, resume from the last successful checkpoint — find it with `listCheckpoints(runId)`.
+- **`ctx.interrupt(value)` discards the node's in-flight state writes.** The interrupt throws before the node's partial update is folded, and `resume` re-runs the whole node. Persist anything that must survive in the returned state or inside the interrupt value.
+- **Without `outputSchema`, an agent's non-text array parts are dropped.** `coerceOutput` joins only string / `{ text }` parts and ignores numbers and objects. Use `outputSchema` when the result is structured.
+- **`outputSchema: z.string()` can misread text that happens to be valid JSON.** Structured output tries `JSON.parse` first, so a bare `123`, `true`, or a quoted string is parsed before validation. Prefer non-JSON-shaped text for `z.string()` channels.
+- **The `run → checkpoint` index is not atomic.** `DomainCheckpointStore` does a `get`-then-`put` on the `runs` table. One DSH process serializes this; multiple processes sharing the same storage domain can lose an index entry.
 
 ## Development
 

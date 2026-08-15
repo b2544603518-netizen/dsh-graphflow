@@ -22,6 +22,7 @@ export async function apply(ctx: Context): Promise<void> {
 }
 
 export type * from './types.ts'
+export { END } from './types.ts'
 export { GraphEngine } from './service.ts'
 export { Command } from './command.ts'
 export { GraphExecutor, GraphAbortSignal, InterruptSignal, validateGraph } from './graph.ts'
