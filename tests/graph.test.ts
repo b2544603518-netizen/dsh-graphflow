@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import { MemoryCheckpointStore } from '../src/checkpoint.ts'
+import { Command } from '../src/command.ts'
 import { GraphExecutor, validateGraph } from '../src/graph.ts'
 import {
   END,
@@ -12,7 +14,7 @@ import {
   type State,
 } from '../src/types.ts'
 
-const fnNode = (run: (state: State, ctx: NodeContext) => State = () => ({})) => ({
+const fnNode = (run: (state: State, ctx: NodeContext) => State | Command = () => ({})) => ({
   kind: 'function' as const,
   run,
 })
@@ -37,7 +39,7 @@ async function run(
   let seq = 0
   const executor = new GraphExecutor(definition, {
     store,
-    agentExecutor: options.agentExecutor,
+    ...(options.agentExecutor === undefined ? {} : { agentExecutor: options.agentExecutor }),
     emit: (name, payload) => {
       events.push([name, payload])
     },
@@ -46,9 +48,9 @@ async function run(
     now: () => '2026-01-01T00:00:00.000Z',
   })
   const result = await executor.run(input, {
-    signal: options.signal,
-    resumeFrom: options.resumeFrom,
-    resumeValue: options.resumeValue,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.resumeFrom === undefined ? {} : { resumeFrom: options.resumeFrom }),
+    ...(options.resumeValue === undefined ? {} : { resumeValue: options.resumeValue }),
   })
   return { result, events, store }
 }
@@ -83,6 +85,13 @@ describe('GraphExecutor.run', () => {
     const completed = await store.load('ckpt-3')
     expect(completed?.status).toBe('completed')
     expect(completed?.nextNode).toBe(END)
+  })
+
+  it('records a monotonic step per checkpoint and lists them in order', async () => {
+    const { store } = await run(linear, { log: [] })
+    const checkpoints = await store.list('run-1')
+    expect(checkpoints.map(c => c.step)).toEqual([0, 1, 2])
+    expect(checkpoints.map(c => c.id)).toEqual(['ckpt-1', 'ckpt-2', 'ckpt-3'])
   })
 
   it('routes through a conditional edge based on state', async () => {
@@ -120,6 +129,24 @@ describe('GraphExecutor.run', () => {
     expect(result.state.out).toBe('done:p:{}')
   })
 
+  it('passes a per-node model through to the executor', async () => {
+    const modelGraph: GraphDefinition = {
+      id: 'model',
+      stateSchema: { out: { reducer: 'override' } },
+      entry: 'a',
+      nodes: { a: { kind: 'agent', key: 'out', prompt: () => 'x', model: 'deepseek-v4' } },
+      edges: [{ from: 'a', to: END }],
+    }
+    let seenModel: string | undefined
+    const agentExecutor: AgentExecutor = async request => {
+      seenModel = request.model
+      return { output: 'ok' }
+    }
+    const { result } = await run(modelGraph, {}, { agentExecutor })
+    expect(result.status).toBe('completed')
+    expect(seenModel).toBe('deepseek-v4')
+  })
+
   it('fails an agent node when no executor is available', async () => {
     const agentGraph: GraphDefinition = {
       id: 'ag',
@@ -141,7 +168,7 @@ describe('GraphExecutor.run', () => {
       nodes: {
         ask: fnNode((_state, ctx) => {
           if (ctx.resumeValue === undefined) ctx.interrupt('need-answer')
-          return { answer: ctx.resumeValue }
+          return { answer: ctx.resumeValue! }
         }),
         done: fnNode(state => state),
       },
@@ -157,7 +184,7 @@ describe('GraphExecutor.run', () => {
     expect(checkpoint?.nextNode).toBe('ask')
 
     const resumed = await run(interruptGraph, {}, {
-      resumeFrom: checkpoint,
+      resumeFrom: checkpoint!,
       resumeValue: 'the-answer',
     })
     expect(resumed.result.status).toBe('completed')
@@ -238,11 +265,154 @@ describe('GraphExecutor.run', () => {
       state: { log: ['a'] },
       nextNode: 'ghost',
       status: 'running',
+      step: 0,
       updatedAt: 't',
     }
     const { result } = await run(linear, {}, { resumeFrom: ghost })
     expect(result.status).toBe('failed')
     expect(result.error?.message).toMatch(/referenced but not defined/)
+  })
+})
+
+describe('GraphExecutor Command', () => {
+  it('applies Command.update and routes via goto, skipping the edge', async () => {
+    const cmd: GraphDefinition = {
+      id: 'cmd',
+      stateSchema: { log: { reducer: 'append' }, flag: { reducer: 'override' } },
+      entry: 'a',
+      nodes: {
+        a: fnNode(() => new Command({ update: { flag: true }, goto: 'c' })),
+        b: fnNode(() => ({ log: 'b' })),
+        c: fnNode(() => ({ log: 'c' })),
+      },
+      edges: [{ from: 'a', to: 'b' }, { from: 'b', to: 'c' }, { from: 'c', to: END }],
+    }
+    const { result } = await run(cmd)
+    expect(result.status).toBe('completed')
+    expect(result.state).toEqual({ log: ['c'], flag: true })
+  })
+
+  it('routes a node with no edges via Command.goto', async () => {
+    const gotoOnly: GraphDefinition = {
+      id: 'goto',
+      stateSchema: {},
+      entry: 'a',
+      nodes: { a: fnNode(() => new Command({ goto: END })) },
+      edges: [],
+    }
+    const { result } = await run(gotoOnly)
+    expect(result.status).toBe('completed')
+  })
+
+  it('applies Command.update and still follows the edge when no goto is given', async () => {
+    const updateOnly: GraphDefinition = {
+      id: 'upd',
+      stateSchema: { a: { reducer: 'override' }, b: { reducer: 'override' } },
+      entry: 'a',
+      nodes: {
+        a: fnNode(() => new Command({ update: { a: 1 } })),
+        b: fnNode(() => ({ b: 2 })),
+      },
+      edges: [{ from: 'a', to: 'b' }, { from: 'b', to: END }],
+    }
+    const { result } = await run(updateOnly)
+    expect(result.status).toBe('completed')
+    expect(result.state).toEqual({ a: 1, b: 2 })
+  })
+})
+
+describe('GraphExecutor abort', () => {
+  it('rejects the run with a typed reason and writes a rejected checkpoint', async () => {
+    const aborted: GraphDefinition = {
+      id: 'ab',
+      stateSchema: {},
+      entry: 'a',
+      nodes: {
+        a: fnNode((_state, ctx) => ctx.abort({ reason: 'invalid-input' })),
+      },
+      edges: [{ from: 'a', to: END }],
+    }
+    const { result, store, events } = await run(aborted)
+    expect(result.status).toBe('rejected')
+    expect(result.abortValue).toEqual({ reason: 'invalid-input' })
+    const checkpoint = await store.load(result.checkpointId as string)
+    expect(checkpoint?.status).toBe('rejected')
+    expect(checkpoint?.abortValue).toEqual({ reason: 'invalid-input' })
+    expect(events.map(([name]) => name)).toContain('graphflow/abort')
+  })
+})
+
+describe('GraphExecutor node names', () => {
+  it('surfaces node names in tracing events', async () => {
+    const named: GraphDefinition = {
+      id: 'named',
+      stateSchema: {},
+      entry: 'a',
+      nodes: { a: { kind: 'function', name: 'worker', run: () => ({}) } },
+      edges: [{ from: 'a', to: END }],
+    }
+    const { events } = await run(named)
+    const start = events.find(([name]) => name === 'graphflow/node-start')?.[1] as { name?: string }
+    expect(start?.name).toBe('worker')
+  })
+})
+
+describe('GraphExecutor structured agent output', () => {
+  const schemaGraph = (outputSchema: z.ZodType, retries?: number): GraphDefinition => ({
+    id: 'so',
+    stateSchema: { out: { reducer: 'override' } },
+    entry: 'a',
+    nodes: {
+      a: { kind: 'agent', key: 'out', prompt: () => 'x', outputSchema, ...(retries === undefined ? {} : { retries }) },
+    },
+    edges: [{ from: 'a', to: END }],
+  })
+
+  it('parses a JSON payload against an object schema', async () => {
+    const executor: AgentExecutor = async () => ({ output: '{"n": 3}' })
+    const { result } = await run(schemaGraph(z.object({ n: z.number() })), {}, { agentExecutor: executor })
+    expect(result.status).toBe('completed')
+    expect(result.state.out).toEqual({ n: 3 })
+  })
+
+  it('validates bare prose against a string schema', async () => {
+    const executor: AgentExecutor = async () => ({ output: 'hello' })
+    const { result } = await run(schemaGraph(z.string()), {}, { agentExecutor: executor })
+    expect(result.status).toBe('completed')
+    expect(result.state.out).toBe('hello')
+  })
+
+  it('fails when the output does not match the schema', async () => {
+    const executor: AgentExecutor = async () => ({ output: '{"n": "not-a-number"}' })
+    const { result } = await run(schemaGraph(z.object({ n: z.number() })), {}, { agentExecutor: executor })
+    expect(result.status).toBe('failed')
+    expect(result.error?.message).toMatch(/failed validation/)
+  })
+
+  it('retries a failed validation and succeeds on a later attempt', async () => {
+    let calls = 0
+    const executor: AgentExecutor = async request => {
+      calls++
+      if (calls === 1) return { output: '{"n": "bad"}' }
+      expect(request.prompt).toMatch(/failed schema validation/)
+      return { output: '{"n": 5}' }
+    }
+    const { result } = await run(schemaGraph(z.object({ n: z.number() }), 1), {}, { agentExecutor: executor })
+    expect(result.status).toBe('completed')
+    expect(result.state.out).toEqual({ n: 5 })
+    expect(calls).toBe(2)
+  })
+
+  it('fails after exhausting retries', async () => {
+    let calls = 0
+    const executor: AgentExecutor = async () => {
+      calls++
+      return { output: 'always-bad' }
+    }
+    const { result } = await run(schemaGraph(z.object({ n: z.number() }), 1), {}, { agentExecutor: executor })
+    expect(result.status).toBe('failed')
+    expect(result.error?.message).toMatch(/after 2 attempt/)
+    expect(calls).toBe(2)
   })
 })
 
@@ -277,8 +447,8 @@ describe('validateGraph', () => {
     expect(() => validateGraph(g)).toThrow(/at most one/)
   })
 
-  it('rejects a node with no outgoing edge', () => {
-    expect(() => validateGraph(graph({ nodes: { a: fnNode() }, edges: [] }))).toThrow(/no outgoing edge/)
+  it('accepts a node with no outgoing edge (routed via Command.goto)', () => {
+    expect(() => validateGraph(graph({ nodes: { a: fnNode() }, edges: [] }))).not.toThrow()
   })
 
   it('rejects an agent node writing an undeclared channel', () => {
