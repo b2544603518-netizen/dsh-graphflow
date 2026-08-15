@@ -32,7 +32,7 @@ interface Harness {
 async function run(
   definition: GraphDefinition,
   input: State = {},
-  options: { agentExecutor?: AgentExecutor; signal?: AbortSignal; resumeFrom?: Checkpoint; resumeValue?: JsonValue } = {},
+  options: { agentExecutor?: AgentExecutor; signal?: AbortSignal; resumeFrom?: Checkpoint; resumeValue?: JsonValue; maxSteps?: number } = {},
 ): Promise<Harness> {
   const store = new MemoryCheckpointStore()
   const events: Array<[string, unknown]> = []
@@ -51,6 +51,7 @@ async function run(
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.resumeFrom === undefined ? {} : { resumeFrom: options.resumeFrom }),
     ...(options.resumeValue === undefined ? {} : { resumeValue: options.resumeValue }),
+    ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
   })
   return { result, events, store }
 }
@@ -229,6 +230,20 @@ describe('GraphExecutor.run', () => {
     const { result } = await run(failing)
     expect(result.status).toBe('failed')
     expect(result.error).toEqual({ code: 'node_error', message: 'boom' })
+  })
+
+  it('fails with max_steps_exceeded when a route loops past the step limit', async () => {
+    const looping: GraphDefinition = {
+      id: 'loop',
+      stateSchema: {},
+      entry: 'a',
+      nodes: { a: fnNode(() => new Command({ goto: 'a' })) },
+      edges: [],
+    }
+    const { result } = await run(looping, {}, { maxSteps: 5 })
+    expect(result.status).toBe('failed')
+    expect(result.error?.code).toBe('max_steps_exceeded')
+    expect(result.error?.message).toMatch(/step limit/)
   })
 
   it('fails a node with no outgoing edge', async () => {

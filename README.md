@@ -8,9 +8,9 @@ Inspired by [LangGraph](https://github.com/langchain-ai/langgraph)'s state-machi
 
 ## Why this over `ctx.workflowEngine`
 
-DSH's workflow seam runs a *model-written script* that fans out subagents, but it explicitly has **no checkpoint/resume** and **no reusable, saved orchestration**. `dsh-graphflow` fills those gaps:
+DSH's workflow seam runs a *model-written script* that fans out subagents, but it explicitly has **no checkpoint/resume** and **no reusable orchestration**. `dsh-graphflow` fills those gaps:
 
-- **Declarative topology** — nodes and edges are data, so a graph is inspectable, testable, and reusable by id.
+- **Declarative topology** — nodes and edges are data, so a graph is inspectable, testable, and reusable by id *within a process*. Graph definitions are code, not data: they are **not persisted** across host restarts — re-`define` them after a restart.
 - **Typed state with reducers** — each channel folds partial updates deterministically (`override` / `append` / `merge`) instead of hand-rolled state plumbing.
 - **Conditional routing** — a node's next step is decided from state at run time.
 - **Durable checkpoints** — the run snapshots its state after every node, so a crash or an interrupt can resume from where it left off without re-running expensive subagent nodes.
@@ -18,7 +18,7 @@ DSH's workflow seam runs a *model-written script* that fans out subagents, but i
 ## Install
 
 ```bash
-dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.2.1
+dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.2.2
 ```
 
 The repository ships its built Host bundle, so a Git install runs no build script.
@@ -166,6 +166,8 @@ Every run emits observe-only events for tracing: `graphflow/start`, `graphflow/n
 
 No configuration is required. `ctx.get('subagents')`, `ctx.get('agent')`, and `ctx.get('storageDomain')` are resolved opportunistically — function-only graphs work without any of them.
 
+A run executes at most **`maxSteps`** nodes (default **100**) before failing with `error.code === 'max_steps_exceeded'`; override it per run (`run(id, input, { maxSteps })`) or engine-wide (`GraphEngine.open(ctx, { maxSteps })`).
+
 ## Deliberate non-goals (v0.2)
 
 - Dynamic fan-out / map-reduce (`Send`) — planned for v0.3; DSH's `workflow` tool and subagent fork cover map-reduce today.
@@ -177,6 +179,8 @@ No configuration is required. `ctx.get('subagents')`, `ctx.get('agent')`, and `c
 ## Known limits & edges
 
 - **A `failed` or `cancelled` run returns `checkpointId: null`.** Only successful node boundaries are checkpointed. After a node throws, resume from the last successful checkpoint — find it with `listCheckpoints(runId)`.
+- **Graph definitions are not persisted.** They live in memory; after a host restart you must re-`define` a graph before `resume` can resolve its checkpoint (a checkpoint stores only the `graphId`, not the definition).
+- **A runaway route is bounded by `maxSteps`.** A loop that exceeds the limit fails with `max_steps_exceeded`; raise the limit only when a graph legitimately needs more than 100 node executions.
 - **`ctx.interrupt(value)` discards the node's in-flight state writes.** The interrupt throws before the node's partial update is folded, and `resume` re-runs the whole node. Persist anything that must survive in the returned state or inside the interrupt value.
 - **Without `outputSchema`, an agent's non-text array parts are dropped.** `coerceOutput` joins only string / `{ text }` parts and ignores numbers and objects. Use `outputSchema` when the result is structured.
 - **`outputSchema: z.string()` can misread text that happens to be valid JSON.** Structured output tries `JSON.parse` first, so a bare `123`, `true`, or a quoted string is parsed before validation. Prefer non-JSON-shaped text for `z.string()` channels.

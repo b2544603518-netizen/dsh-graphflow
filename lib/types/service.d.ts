@@ -6,12 +6,16 @@ export interface GraphEngineConfig {
     readonly now?: () => string;
     readonly newRunId?: () => string;
     readonly newCheckpointId?: () => string;
+    /** Default step limit for every run (default 100). */
+    readonly maxSteps?: number;
 }
 export interface GraphRunOptions {
     readonly signal?: AbortSignal;
     readonly runId?: string;
     /** The agent that owns any subagents spawned by agent nodes. */
     readonly parent?: unknown;
+    /** Per-run step limit override (default 100). */
+    readonly maxSteps?: number;
 }
 /**
  * Declarative multi-agent graph orchestrator: register a graph once, run it with
