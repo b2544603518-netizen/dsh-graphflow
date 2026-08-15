@@ -46,7 +46,20 @@ await build({
   external: ['@deepseek-ai/*', 'cordis'],
 })
 
+// Client bundle (browser): the web shell serves it at /plugins/<id>/client.js.
+await build({
+  entryPoints: ['src/client/index.ts'],
+  bundle: true,
+  format: 'esm',
+  platform: 'browser',
+  target: 'es2020',
+  outfile: 'lib/client.js',
+  external: ['react', 'react-dom', '@deepseek-ai/*'],
+})
+
 const source = await readFile('lib/index.js', 'utf8')
 await writeFile('lib/index.js', source.replace(/[ \t]+$/gm, ''))
+const clientSource = await readFile('lib/client.js', 'utf8')
+await writeFile('lib/client.js', clientSource.replace(/[ \t]+$/gm, ''))
 
-console.log('[dsh-graphflow] built Host bundle')
+console.log('[dsh-graphflow] built Host + Client bundles')

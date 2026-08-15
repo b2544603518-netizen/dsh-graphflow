@@ -18,7 +18,7 @@ DSH's workflow seam runs a *model-written script* that fans out subagents, but i
 ## Install
 
 ```bash
-dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.2.2
+dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.3.0
 ```
 
 The repository ships its built Host bundle, so a Git install runs no build script.
