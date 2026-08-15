@@ -1,5 +1,7 @@
 # dsh-graphflow
 
+English · [简体中文](./README_ZH.md)
+
 Declarative graph orchestration for [DeepSeek Harness](https://github.com/deepseek-ai). Register a multi-agent flow as a graph of **nodes** and **edges** over **typed state**, then run it with **conditional routing**, **`Command`-driven control flow**, **structured agent output**, **guard/abort**, and **resumable checkpoints**.
 
 Inspired by [LangGraph](https://github.com/langchain-ai/langgraph)'s state-machine model, built natively on DSH's subagent seam and Cordis lifecycle. It is a developer-facing engine: other plugins (or future agent tools) consume `ctx.graphEngine`.
@@ -158,7 +160,7 @@ Checkpoints are durable when the Host mounts `storageDomain` (see `src/domain.ts
 
 ## Events
 
-Every run emits observe-only events for tracing: `graphflow/start`, `graphflow/node-start`, `graphflow/node-end`, `graphflow/checkpoint`, `graphflow/interrupt`, `graphflow/end`.
+Every run emits observe-only events for tracing: `graphflow/start`, `graphflow/node-start`, `graphflow/node-end`, `graphflow/checkpoint`, `graphflow/interrupt`, `graphflow/abort`, `graphflow/end`.
 
 ## Configuration
 
