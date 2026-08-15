@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/dsh-graphflow",
-  "version": "0.2.2",
-  "description": "Declarative graph orchestration for DeepSeek Harness: nodes, edges, typed state, Command control flow, structured agent output, guard/abort, and resumable checkpoints",
+  "version": "0.3.0",
+  "description": "Declarative graph orchestration for DeepSeek Harness: a graph engine (nodes, edges, typed state, Command, structured output, guard/abort, checkpoints) plus a web panel and model-facing tools",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -10,12 +10,17 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
     "cordis.patch.yml",
     "README.md",
+    "README_ZH.md",
     "LICENSE"
   ],
   "license": "MIT",
@@ -25,6 +30,9 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "scripts": {
@@ -39,12 +47,15 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.1-rc.1"
+    "@deepseek-ai/schemastery": "^3.18.1-rc.1",
+    "react": "^18.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/react": "~18.3.1",
     "@vitest/coverage-v8": "^4.1.8",
     "esbuild": "^0.25.0",
+    "react": "^18.3.1",
     "typescript": "^5.9.0",
     "vitest": "^4.1.8"
   },

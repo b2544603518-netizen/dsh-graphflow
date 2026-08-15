@@ -42,7 +42,7 @@ DSH 的 workflow 接缝跑的是「模型现写的脚本」去扇出子代理，
 ## 安装
 
 ```bash
-dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.2.2
+dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.3.0
 ```
 
 仓库自带已构建的 Host bundle，Git 安装时无需跑构建脚本。
