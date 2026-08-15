@@ -12,6 +12,13 @@ import type {
   State,
 } from './types.ts'
 
+/**
+ * Minimal structural views of the DSH `subagents` / `storageDomain` services,
+ * verified against `@deepseek-ai/dsh-subagent` (v0.0.1-rc) and the storage-domain
+ * seam. The real `SubagentStartRequest` carries `prompt: ContentBlock[]` (not a
+ * string) and routes a model override through `agentOptions.model`; `SubagentResult`
+ * carries `output: ContentBlock[]` and `stopReason: SubagentStopReason`.
+ */
 interface SubagentRun {
   readonly result: Promise<{ readonly output: unknown; readonly stopReason: string }>
   dispose(): Promise<void>
@@ -35,6 +42,8 @@ export interface GraphEngineConfig {
   readonly now?: () => string
   readonly newRunId?: () => string
   readonly newCheckpointId?: () => string
+  /** Default step limit for every run (default 100). */
+  readonly maxSteps?: number
 }
 
 export interface GraphRunOptions {
@@ -42,6 +51,8 @@ export interface GraphRunOptions {
   readonly runId?: string
   /** The agent that owns any subagents spawned by agent nodes. */
   readonly parent?: unknown
+  /** Per-run step limit override (default 100). */
+  readonly maxSteps?: number
 }
 
 /**
@@ -98,6 +109,7 @@ export class GraphEngine {
     return executor.run(input, {
       ...(options.runId === undefined ? {} : { runId: options.runId }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
     })
   }
 
@@ -118,6 +130,7 @@ export class GraphEngine {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       resumeFrom: checkpoint,
       ...(resumeValue === undefined ? {} : { resumeValue }),
+      ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
     })
   }
 
@@ -155,6 +168,7 @@ export class GraphEngine {
       ...(this.config.now === undefined ? {} : { now: this.config.now }),
       ...(this.config.newRunId === undefined ? {} : { newRunId: this.config.newRunId }),
       ...(this.config.newCheckpointId === undefined ? {} : { newCheckpointId: this.config.newCheckpointId }),
+      ...(this.config.maxSteps === undefined ? {} : { maxSteps: this.config.maxSteps }),
     }
   }
 
@@ -170,8 +184,8 @@ export class GraphEngine {
       const run = await subagents.start(provider, {
         parent,
         label: request.name ?? 'graphflow-agent-node',
-        prompt: request.prompt,
-        ...(request.model === undefined ? {} : { model: request.model }),
+        prompt: [{ type: 'text', text: request.prompt }],
+        ...(request.model === undefined ? {} : { agentOptions: { model: request.model } }),
         ...(nodeCtx.signal === undefined ? {} : { signal: nodeCtx.signal }),
       })
       try {

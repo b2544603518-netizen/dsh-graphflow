@@ -34,6 +34,14 @@ export class GraphAbortSignal extends Error {
   }
 }
 
+/** Thrown when a run exceeds its step limit; a route likely forms an infinite loop. */
+export class MaxStepsExceededError extends Error {
+  constructor(readonly graphId: string, readonly limit: number) {
+    super(`Graph '${graphId}' exceeded the step limit (${limit}) — a node route likely forms an infinite loop.`)
+    this.name = 'MaxStepsExceededError'
+  }
+}
+
 export interface GraphExecutorDeps {
   readonly store: CheckpointStore
   readonly agentExecutor?: AgentExecutor
@@ -41,6 +49,8 @@ export interface GraphExecutorDeps {
   readonly newCheckpointId?: () => string
   readonly newRunId?: () => string
   readonly now?: () => string
+  /** Default step limit when a run does not override it (default 100). */
+  readonly maxSteps?: number
 }
 
 export interface GraphRunOptions {
@@ -48,6 +58,8 @@ export interface GraphRunOptions {
   readonly signal?: AbortSignal
   readonly resumeFrom?: Checkpoint
   readonly resumeValue?: JsonValue
+  /** Maximum node executions before the run fails as `max_steps_exceeded`. */
+  readonly maxSteps?: number
 }
 
 /**
@@ -70,12 +82,18 @@ export class GraphExecutor {
     let current: NodeId | typeof END = resumed ? options.resumeFrom.nextNode : this.graph.entry
     let pendingResumeValue: JsonValue | undefined = options.resumeValue
     let step = resumed ? options.resumeFrom.step + 1 : 0
+    const maxSteps = options.maxSteps ?? this.deps.maxSteps ?? 100
+    let executed = 0
 
     emit?.('graphflow/start', { runId, graphId: this.graph.id, resumed })
 
     try {
       while (current !== END) {
         this.throwIfAborted(options.signal)
+        if (executed >= maxSteps) {
+          throw new MaxStepsExceededError(this.graph.id, maxSteps)
+        }
+        executed++
         const node = this.graph.nodes[current]
         if (node === undefined) {
           throw new Error(`Node '${current}' is referenced but not defined.`)
@@ -139,6 +157,16 @@ export class GraphExecutor {
       if (this.isAbort(error)) {
         emit?.('graphflow/end', { runId, status: 'cancelled' })
         return { runId, status: 'cancelled', state, checkpointId: null }
+      }
+      if (error instanceof MaxStepsExceededError) {
+        emit?.('graphflow/end', { runId, status: 'failed' })
+        return {
+          runId,
+          status: 'failed',
+          state,
+          checkpointId: null,
+          error: { code: 'max_steps_exceeded', message: error.message },
+        }
       }
       emit?.('graphflow/end', { runId, status: 'failed' })
       return {

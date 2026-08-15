@@ -32,9 +32,9 @@ review: {
 
 ## 为什么不用 `ctx.workflowEngine`
 
-DSH 的 workflow 接缝跑的是「模型现写的脚本」去扇出子代理，但它**没有 checkpoint/resume**，也**没有可复用、可保存的编排**。`dsh-graphflow` 补齐这两块：
+DSH 的 workflow 接缝跑的是「模型现写的脚本」去扇出子代理，但它**没有 checkpoint/resume**，也**没有可复用的编排**。`dsh-graphflow` 补齐这两块：
 
-- **声明式拓扑** —— 节点和边都是数据，图可检查、可测试、可按 id 复用。
+- **声明式拓扑** —— 节点和边都是数据，图可检查、可测试、可按 id 复用（**进程内**）。图定义是代码、不是数据：**不跨重启持久化**，重启后要重新 `define`。
 - **带 reducer 的类型化状态** —— 每个 channel 用确定性方式折叠局部更新（`override` / `append` / `merge`），不用手搓状态管道。
 - **条件路由** —— 节点的下一步在运行时根据 state 决定。
 - **持久化 checkpoint** —— 每跑完一个节点就快照一次 state，崩溃或中断后能从原地恢复，不用重跑昂贵的 agent 节点。
@@ -42,7 +42,7 @@ DSH 的 workflow 接缝跑的是「模型现写的脚本」去扇出子代理，
 ## 安装
 
 ```bash
-dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.2.1
+dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.2.2
 ```
 
 仓库自带已构建的 Host bundle，Git 安装时无需跑构建脚本。
@@ -190,6 +190,8 @@ const again = await ctx.graphEngine.resume(checkpointId) // 从最后一个节�
 
 无需配置。`ctx.get('subagents')`、`ctx.get('agent')`、`ctx.get('storageDomain')` 按需探测——纯 function 的图三者都不需要。
 
+一次 run 最多执行 **`maxSteps`** 个节点（默认 **100**），超过即以 `error.code === 'max_steps_exceeded'` 失败；可按 run 覆盖（`run(id, input, { maxSteps })`）或引擎级设置（`GraphEngine.open(ctx, { maxSteps })`）。
+
 ## 明确的非目标（v0.2）
 
 - 动态扇出 / map-reduce（`Send`）——计划 v0.3；DSH 的 `workflow` 工具和 subagent fork 今天已能覆盖 map-reduce。
@@ -201,6 +203,8 @@ const again = await ctx.graphEngine.resume(checkpointId) // 从最后一个节�
 ## 已知限制与边界
 
 - **`failed` 或 `cancelled` 的 run 返回 `checkpointId: null`。** 只有成功完成的节点边界才写 checkpoint。节点抛错后，用 `listCheckpoints(runId)` 找到最后一个成功 checkpoint 再续跑。
+- **图定义不持久化。** 它们存在内存里；宿主重启后必须先重新 `define`，`resume` 才能解析 checkpoint（checkpoint 只存了 `graphId`，不存定义本身）。
+- **失控回环由 `maxSteps` 兜底。** 超过限制的回环会以 `max_steps_exceeded` 失败；只有当图确实需要超过 100 次节点执行时才调高限制。
 - **`ctx.interrupt(value)` 会丢弃该节点在调用前已写的局部状态。** interrupt 在 partial update 折叠前抛出，`resume` 时整节点重跑。需要保留的状态请放进返回值或 interrupt value 里。
 - **不加 `outputSchema` 时，agent 返回的非文本数组片段会被静默丢弃。** `coerceOutput` 只拼接 string / `{ text }` 片段，数字和对象被忽略。结果要是结构化的，请用 `outputSchema`。
 - **`outputSchema: z.string()` 对「碰巧是合法 JSON 的文本」会误判。** 结构化输出先尝试 `JSON.parse`，所以裸的 `123`、`true` 或带引号的字符串会先被解析再校验。`z.string()` 的 channel 请避免让 agent 输出可被 JSON 解析的裸值。

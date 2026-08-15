@@ -222,6 +222,36 @@ describe('GraphEngine.run', () => {
     expect(result.state.out).toBe('injected:do it')
     await engine.dispose()
   })
+
+  it('fails a looping graph at the config-level step limit', async () => {
+    const engine = await GraphEngine.open(fakeCtx(), { maxSteps: 3 })
+    engine.define({
+      id: 'loop',
+      stateSchema: {},
+      entry: 'a',
+      nodes: { a: fnNode() },
+      edges: [{ from: 'a', route: () => 'a' }],
+    })
+    const result = await engine.run('loop', {})
+    expect(result.status).toBe('failed')
+    expect(result.error?.code).toBe('max_steps_exceeded')
+    await engine.dispose()
+  })
+
+  it('honors a per-run step limit override', async () => {
+    const engine = await GraphEngine.open(fakeCtx())
+    engine.define({
+      id: 'loop2',
+      stateSchema: {},
+      entry: 'a',
+      nodes: { a: fnNode() },
+      edges: [{ from: 'a', route: () => 'a' }],
+    })
+    const result = await engine.run('loop2', {}, { maxSteps: 3 })
+    expect(result.status).toBe('failed')
+    expect(result.error?.code).toBe('max_steps_exceeded')
+    await engine.dispose()
+  })
 })
 
 describe('GraphEngine.resume', () => {
@@ -251,6 +281,29 @@ describe('GraphEngine.resume', () => {
     const result = await engine.run('linear', { log: [] })
     const resumed = await engine.resume(result.checkpointId as string)
     expect(resumed.status).toBe('completed')
+    await engine.dispose()
+  })
+
+  it('honors a per-run step limit on resume', async () => {
+    const engine = await GraphEngine.open(fakeCtx())
+    engine.define({
+      id: 'resume-loop',
+      stateSchema: { started: { reducer: 'override' } },
+      entry: 'a',
+      nodes: {
+        a: fnNode((state, ctx) => {
+          if (state.started === true) return {}
+          if (ctx.resumeValue === undefined) ctx.interrupt('x')
+          return { started: true }
+        }),
+      },
+      edges: [{ from: 'a', route: () => 'a' }],
+    })
+    const first = await engine.run('resume-loop', {})
+    expect(first.status).toBe('interrupted')
+    const resumed = await engine.resume(first.checkpointId as string, 'go', { maxSteps: 3 })
+    expect(resumed.status).toBe('failed')
+    expect(resumed.error?.code).toBe('max_steps_exceeded')
     await engine.dispose()
   })
 
@@ -355,7 +408,7 @@ describe('GraphEngine agent nodes', () => {
     expect(subagents.calls).toHaveLength(1)
     expect(subagents.calls[0]?.name).toBe('p1')
     expect(subagents.calls[0]?.request.parent).toEqual({ id: 'parent' })
-    expect(subagents.calls[0]?.request.prompt).toBe('do it')
+    expect(subagents.calls[0]?.request.prompt).toEqual([{ type: 'text', text: 'do it' }])
   })
 
   it('honors a per-node provider override', async () => {
@@ -398,7 +451,7 @@ describe('GraphEngine agent nodes', () => {
       edges: [{ from: 'a', to: END }],
     })
     await engine.run('ag4', {}, { signal: controller.signal })
-    expect(subagents.calls[0]?.request.model).toBe('deepseek-v4')
+    expect(subagents.calls[0]?.request.agentOptions).toEqual({ model: 'deepseek-v4' })
     expect(subagents.calls[0]?.request.signal).toBe(controller.signal)
   })
 

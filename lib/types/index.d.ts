@@ -11,7 +11,7 @@ export type * from './types.ts';
 export { END } from './types.ts';
 export { GraphEngine } from './service.ts';
 export { Command } from './command.ts';
-export { GraphExecutor, GraphAbortSignal, InterruptSignal, validateGraph } from './graph.ts';
+export { GraphExecutor, GraphAbortSignal, InterruptSignal, MaxStepsExceededError, validateGraph } from './graph.ts';
 export { validateAgentOutput } from './agentOutput.ts';
 export { MemoryCheckpointStore, newCheckpointId, newRunId } from './checkpoint.ts';
 export { DomainCheckpointStore, graphflowDomainSpec } from './domain.ts';
