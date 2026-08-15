@@ -1,4 +1,6 @@
+import { validateAgentOutput } from './agentOutput.ts'
 import { newCheckpointId, newRunId } from './checkpoint.ts'
+import { Command } from './command.ts'
 import { asMessage } from './json.ts'
 import { applyPartial, initialState } from './state.ts'
 import {
@@ -24,6 +26,14 @@ export class InterruptSignal extends Error {
   }
 }
 
+/** Thrown by `NodeContext.abort`; caught by the executor and converted into a rejected checkpoint. */
+export class GraphAbortSignal extends Error {
+  constructor(readonly value: JsonValue) {
+    super('A graph node aborted the run.')
+    this.name = 'GraphAbortSignal'
+  }
+}
+
 export interface GraphExecutorDeps {
   readonly store: CheckpointStore
   readonly agentExecutor?: AgentExecutor
@@ -43,8 +53,8 @@ export interface GraphRunOptions {
 /**
  * Executes one graph definition as a super-step loop: run the current node,
  * fold its partial update through the state reducers, route through the node's
- * single outgoing edge, and checkpoint before advancing. Resumable by passing a
- * `resumeFrom` checkpoint.
+ * outgoing edge or a returned `Command`, and checkpoint before advancing.
+ * Resumable by passing a `resumeFrom` checkpoint.
  */
 export class GraphExecutor {
   constructor(
@@ -59,6 +69,7 @@ export class GraphExecutor {
     let state: State = resumed ? options.resumeFrom.state : initialState(this.graph.stateSchema, input)
     let current: NodeId | typeof END = resumed ? options.resumeFrom.nextNode : this.graph.entry
     let pendingResumeValue: JsonValue | undefined = options.resumeValue
+    let step = resumed ? options.resumeFrom.step + 1 : 0
 
     emit?.('graphflow/start', { runId, graphId: this.graph.id, resumed })
 
@@ -69,7 +80,8 @@ export class GraphExecutor {
         if (node === undefined) {
           throw new Error(`Node '${current}' is referenced but not defined.`)
         }
-        emit?.('graphflow/node-start', { runId, nodeId: current })
+        const nodeLabel = node.name ?? current
+        emit?.('graphflow/node-start', { runId, nodeId: current, name: nodeLabel })
         const ctx: NodeContext = {
           runId,
           ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -77,29 +89,52 @@ export class GraphExecutor {
           interrupt: (value) => {
             throw new InterruptSignal(value)
           },
+          abort: (value) => {
+            throw new GraphAbortSignal(value)
+          },
         }
         pendingResumeValue = undefined
-        const partial = await this.executeNode(node, state, ctx)
-        state = applyPartial(state, this.graph.stateSchema, partial)
-        const next = this.resolveNext(current, state)
-        const checkpoint = this.checkpoint(runId, state, next, 'running')
+        const result = await this.executeNode(node, state, ctx)
+        let next: NodeId | typeof END
+        if (result instanceof Command) {
+          if (result.update !== undefined) {
+            state = applyPartial(state, this.graph.stateSchema, result.update)
+          }
+          next = result.goto ?? this.resolveNext(current, state)
+        } else {
+          state = applyPartial(state, this.graph.stateSchema, result)
+          next = this.resolveNext(current, state)
+        }
+        const checkpoint = this.checkpoint(runId, state, next, 'running', step)
         await this.deps.store.save(checkpoint)
-        emit?.('graphflow/node-end', { runId, nodeId: current })
+        emit?.('graphflow/node-end', { runId, nodeId: current, name: nodeLabel })
         emit?.('graphflow/checkpoint', { runId, checkpointId: checkpoint.id, nodeId: current })
         current = next
+        step++
       }
 
-      const checkpoint = this.checkpoint(runId, state, END, 'completed')
+      const checkpoint = this.checkpoint(runId, state, END, 'completed', step)
       await this.deps.store.save(checkpoint)
       emit?.('graphflow/end', { runId, status: 'completed' })
       return { runId, status: 'completed', state, checkpointId: checkpoint.id }
     } catch (error) {
       if (error instanceof InterruptSignal) {
-        const checkpoint = this.checkpoint(runId, state, current, 'interrupted', error.value)
+        const checkpoint = this.checkpoint(runId, state, current, 'interrupted', step, {
+          interruptValue: error.value,
+        })
         await this.deps.store.save(checkpoint)
         emit?.('graphflow/interrupt', { runId, nodeId: current, value: error.value })
         emit?.('graphflow/end', { runId, status: 'interrupted' })
         return { runId, status: 'interrupted', state, checkpointId: checkpoint.id, interruptValue: error.value }
+      }
+      if (error instanceof GraphAbortSignal) {
+        const checkpoint = this.checkpoint(runId, state, current, 'rejected', step, {
+          abortValue: error.value,
+        })
+        await this.deps.store.save(checkpoint)
+        emit?.('graphflow/abort', { runId, nodeId: current, value: error.value })
+        emit?.('graphflow/end', { runId, status: 'rejected' })
+        return { runId, status: 'rejected', state, checkpointId: checkpoint.id, abortValue: error.value }
       }
       if (this.isAbort(error)) {
         emit?.('graphflow/end', { runId, status: 'cancelled' })
@@ -116,26 +151,44 @@ export class GraphExecutor {
     }
   }
 
-  private async executeNode(node: GraphNode, state: State, ctx: NodeContext): Promise<State> {
+  private async executeNode(node: GraphNode, state: State, ctx: NodeContext): Promise<State | Command> {
     if (node.kind === 'function') {
       return node.run(state, ctx)
     }
     if (this.deps.agentExecutor === undefined) {
       throw new Error('The node is an agent node but no agent executor is available.')
     }
-    const request = {
-      prompt: node.prompt(state, ctx),
-      ...(node.provider === undefined ? {} : { provider: node.provider }),
-      ...(node.model === undefined ? {} : { model: node.model }),
+    const basePrompt = node.prompt(state, ctx)
+    const attempts = Math.max(0, node.retries ?? 0) + 1
+    let prompt = basePrompt
+    let lastError = ''
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const request = {
+        prompt,
+        ...(node.name === undefined ? {} : { name: node.name }),
+        ...(node.provider === undefined ? {} : { provider: node.provider }),
+        ...(node.model === undefined ? {} : { model: node.model }),
+      }
+      const result = await this.deps.agentExecutor(request, ctx)
+      if (node.outputSchema === undefined) {
+        return { [node.key]: result.output }
+      }
+      const validated = validateAgentOutput(result.output, node.outputSchema)
+      if (validated.ok) {
+        return { [node.key]: validated.value }
+      }
+      lastError = validated.error
+      if (attempt < attempts - 1) {
+        prompt = `${basePrompt}\n\nYour previous output failed schema validation:\n${lastError}\nPlease return a valid JSON value matching the requested schema.`
+      }
     }
-    const result = await this.deps.agentExecutor(request, ctx)
-    return { [node.key]: result.output }
+    throw new Error(`Agent node '${node.name ?? node.key}' output failed validation after ${attempts} attempt(s): ${lastError}`)
   }
 
   private resolveNext(from: NodeId, state: State): NodeId | typeof END {
     const edges = this.graph.edges.filter(edge => edge.from === from)
     if (edges.length === 0) {
-      throw new Error(`Node '${from}' has no outgoing edge. Route it to another node or END.`)
+      throw new Error(`Node '${from}' has no outgoing edge. Route it to another node or END, or return a Command with a goto.`)
     }
     if (edges.length > 1) {
       throw new Error(`Node '${from}' declares more than one outgoing edge.`)
@@ -149,7 +202,8 @@ export class GraphExecutor {
     state: State,
     nextNode: NodeId | typeof END,
     status: Checkpoint['status'],
-    interruptValue?: JsonValue,
+    step: number,
+    extra?: { interruptValue?: JsonValue; abortValue?: JsonValue },
   ): Checkpoint {
     return {
       id: this.deps.newCheckpointId?.() ?? newCheckpointId(),
@@ -158,8 +212,10 @@ export class GraphExecutor {
       state,
       nextNode,
       status,
+      step,
       updatedAt: this.deps.now?.() ?? new Date().toISOString(),
-      ...(interruptValue === undefined ? {} : { interruptValue }),
+      ...(extra?.interruptValue === undefined ? {} : { interruptValue: extra.interruptValue }),
+      ...(extra?.abortValue === undefined ? {} : { abortValue: extra.abortValue }),
     }
   }
 
@@ -202,7 +258,6 @@ export function validateGraph(graph: GraphDefinition): void {
     if (count > 1) problems.push(`node '${from}' declares ${count} outgoing edges (at most one is allowed)`)
   }
   for (const [id, node] of Object.entries(graph.nodes)) {
-    if (!fromCount.has(id)) problems.push(`node '${id}' has no outgoing edge`)
     if (node.kind === 'agent' && graph.stateSchema[node.key] === undefined) {
       problems.push(`agent node '${id}' writes to undeclared channel '${node.key}'`)
     }

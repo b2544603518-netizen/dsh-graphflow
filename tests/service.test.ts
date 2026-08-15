@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
 import { MemoryCheckpointStore } from '../src/checkpoint.ts'
 import { GraphEngine } from '../src/service.ts'
-import { END, type Checkpoint, type CheckpointStore, type GraphDefinition, type State } from '../src/types.ts'
+import { END, type Checkpoint, type CheckpointStore, type GraphDefinition, type NodeContext, type State } from '../src/types.ts'
 
-const fnNode = (run: (state: State) => State = () => ({})) => ({ kind: 'function' as const, run })
+const fnNode = (run: (state: State, ctx: NodeContext) => State = () => ({})) => ({ kind: 'function' as const, run })
 
 const linear: GraphDefinition = {
   id: 'linear',
@@ -38,11 +39,13 @@ const interruptGraph: GraphDefinition = {
 interface FakeStorageDomain {
   open: () => Promise<{ table: (name: string) => unknown; close: () => Promise<void> }>
   records: Map<string, unknown>
+  runRecords: Map<string, unknown>
   isClosed: () => boolean
 }
 
 function fakeStorageDomain(options: { closeThrows?: boolean } = {}): FakeStorageDomain {
   const records = new Map<string, unknown>()
+  const runRecords = new Map<string, unknown>()
   let closed = false
   const table = {
     get: (key: string) => records.get(key),
@@ -51,15 +54,23 @@ function fakeStorageDomain(options: { closeThrows?: boolean } = {}): FakeStorage
     },
     delete: async (key: string) => records.delete(key),
   }
+  const runTable = {
+    get: (key: string) => runRecords.get(key),
+    put: async (key: string, value: unknown) => {
+      runRecords.set(key, value)
+    },
+    delete: async (key: string) => runRecords.delete(key),
+  }
   return {
     open: async () => ({
-      table: () => table,
+      table: (name: string) => (name === 'runs' ? runTable : table),
       close: async () => {
         closed = true
         if (options.closeThrows) throw new Error('close failed')
       },
     }),
     records,
+    runRecords,
     isClosed: () => closed,
   }
 }
@@ -92,7 +103,7 @@ function fakeSubagents(options: { providers?: string[]; output?: unknown; stopRe
   }
 }
 
-function fakeCtx(services: Record<string, unknown> = {}) {
+function fakeCtx(services: Record<string, unknown> = {}): Context & { emitted: Array<[string, unknown]> } {
   const emitted: Array<[string, unknown]> = []
   return {
     get: (name: string) => services[name],
@@ -100,7 +111,7 @@ function fakeCtx(services: Record<string, unknown> = {}) {
       emitted.push([name, payload])
     },
     emitted,
-  }
+  } as unknown as Context & { emitted: Array<[string, unknown]> }
 }
 
 describe('GraphEngine.open', () => {
@@ -124,7 +135,7 @@ describe('GraphEngine.open', () => {
   it('does not dispose a caller-provided store', async () => {
     const store = new MemoryCheckpointStore()
     let disposed = false
-    ;(store as CheckpointStore & { dispose: () => Promise<void> }).dispose = async () => {
+    ;(store as unknown as CheckpointStore & { dispose: () => Promise<void> }).dispose = async () => {
       disposed = true
     }
     const engine = await GraphEngine.open(fakeCtx(), { checkpointStore: store })
@@ -135,6 +146,28 @@ describe('GraphEngine.open', () => {
   it('swallows a failing store close during dispose', async () => {
     const domain = fakeStorageDomain({ closeThrows: true })
     const engine = await GraphEngine.open(fakeCtx({ storageDomain: domain }))
+    await expect(engine.dispose()).resolves.toBeUndefined()
+  })
+
+  it('honors injected run/checkpoint id and time factories', async () => {
+    let seq = 0
+    const engine = await GraphEngine.open(fakeCtx(), {
+      newRunId: () => 'custom-run',
+      newCheckpointId: () => `custom-ckpt-${++seq}`,
+      now: () => '2026-05-05T00:00:00.000Z',
+    })
+    engine.define(linear)
+    const result = await engine.run('linear', { log: [] })
+    expect(result.runId).toBe('custom-run')
+    expect(result.checkpointId).toBe('custom-ckpt-3')
+    const checkpoint = await engine.getCheckpoint('custom-ckpt-3')
+    expect(checkpoint?.updatedAt).toBe('2026-05-05T00:00:00.000Z')
+    await engine.dispose()
+  })
+
+  it('dispose is idempotent', async () => {
+    const engine = await GraphEngine.open(fakeCtx())
+    await engine.dispose()
     await expect(engine.dispose()).resolves.toBeUndefined()
   })
 })
@@ -171,6 +204,24 @@ describe('GraphEngine.run', () => {
     await engine.dispose()
     await expect(engine.run('linear', {})).rejects.toThrow(/disposed/)
   })
+
+  it('passes an explicit runId through to the run', async () => {
+    const engine = await GraphEngine.open(fakeCtx())
+    engine.define(linear)
+    const result = await engine.run('linear', { log: [] }, { runId: 'explicit-run' })
+    expect(result.runId).toBe('explicit-run')
+    await engine.dispose()
+  })
+
+  it('uses a config-provided agent executor', async () => {
+    const engine = await GraphEngine.open(fakeCtx(), {
+      agentExecutor: async request => ({ output: `injected:${request.prompt}` }),
+    })
+    engine.define(agentGraph)
+    const result = await engine.run('ag', {})
+    expect(result.state.out).toBe('injected:do it')
+    await engine.dispose()
+  })
 })
 
 describe('GraphEngine.resume', () => {
@@ -182,6 +233,25 @@ describe('GraphEngine.resume', () => {
     const resumed = await engine.resume(first.checkpointId as string, 'answer')
     expect(resumed.status).toBe('completed')
     expect(resumed.state).toEqual({ answer: 'answer' })
+  })
+
+  it('passes a signal through resume', async () => {
+    const engine = await GraphEngine.open(fakeCtx())
+    engine.define(interruptGraph)
+    const first = await engine.run('int', {})
+    const controller = new AbortController()
+    const resumed = await engine.resume(first.checkpointId as string, 'answer', { signal: controller.signal })
+    expect(resumed.status).toBe('completed')
+    await engine.dispose()
+  })
+
+  it('resumes without a resume value', async () => {
+    const engine = await GraphEngine.open(fakeCtx())
+    engine.define(linear)
+    const result = await engine.run('linear', { log: [] })
+    const resumed = await engine.resume(result.checkpointId as string)
+    expect(resumed.status).toBe('completed')
+    await engine.dispose()
   })
 
   it('rejects an unknown checkpoint', async () => {
@@ -198,6 +268,7 @@ describe('GraphEngine.resume', () => {
       state: {},
       nextNode: 'a',
       status: 'running',
+      step: 0,
       updatedAt: 't',
     }
     await store.save(checkpoint)
@@ -225,6 +296,25 @@ describe('GraphEngine.getCheckpoint', () => {
     const engine = await GraphEngine.open(fakeCtx())
     await engine.dispose()
     await expect(engine.getCheckpoint('c')).rejects.toThrow(/disposed/)
+  })
+})
+
+describe('GraphEngine.listCheckpoints', () => {
+  it('lists the checkpoints of a run', async () => {
+    const domain = fakeStorageDomain()
+    const engine = await GraphEngine.open(fakeCtx({ storageDomain: domain }))
+    engine.define(linear)
+    const result = await engine.run('linear', { log: [] })
+    const list = await engine.listCheckpoints(result.runId)
+    expect(list.length).toBeGreaterThan(0)
+    expect(list.every(c => c.runId === result.runId)).toBe(true)
+    await engine.dispose()
+  })
+
+  it('rejects lookups after dispose', async () => {
+    const engine = await GraphEngine.open(fakeCtx())
+    await engine.dispose()
+    await expect(engine.listCheckpoints('r')).rejects.toThrow(/disposed/)
   })
 })
 
@@ -282,6 +372,36 @@ describe('GraphEngine agent nodes', () => {
     expect(subagents.calls[0]?.name).toBe('chosen')
   })
 
+  it('uses the agent node name as the subagent label when present', async () => {
+    const subagents = fakeSubagents()
+    const engine = await GraphEngine.open(fakeCtx({ subagents, agent: { id: 'p' } }))
+    engine.define({
+      id: 'ag3',
+      stateSchema: { out: { reducer: 'override' } },
+      entry: 'a',
+      nodes: { a: { kind: 'agent', name: 'researcher', key: 'out', prompt: () => 'x' } },
+      edges: [{ from: 'a', to: END }],
+    })
+    await engine.run('ag3', {})
+    expect(subagents.calls[0]?.request.label).toBe('researcher')
+  })
+
+  it('passes a per-node model and the run signal through to the subagent', async () => {
+    const subagents = fakeSubagents()
+    const controller = new AbortController()
+    const engine = await GraphEngine.open(fakeCtx({ subagents, agent: { id: 'p' } }))
+    engine.define({
+      id: 'ag4',
+      stateSchema: { out: { reducer: 'override' } },
+      entry: 'a',
+      nodes: { a: { kind: 'agent', key: 'out', prompt: () => 'x', model: 'deepseek-v4' } },
+      edges: [{ from: 'a', to: END }],
+    })
+    await engine.run('ag4', {}, { signal: controller.signal })
+    expect(subagents.calls[0]?.request.model).toBe('deepseek-v4')
+    expect(subagents.calls[0]?.request.signal).toBe(controller.signal)
+  })
+
   it('fails an agent node when no provider is registered', async () => {
     const subagents = fakeSubagents({ providers: [] })
     const engine = await GraphEngine.open(fakeCtx({ subagents, agent: { id: 'p' } }))
@@ -316,5 +436,33 @@ describe('GraphEngine agent nodes', () => {
     const objEngine = await GraphEngine.open(fakeCtx({ subagents: fakeSubagents({ output: { a: 1 } }), agent: { id: 'p' } }))
     objEngine.define(agentGraph)
     expect((await objEngine.run('ag', {})).state.out).toBe('{"a":1}')
+  })
+
+  it('coerces undefined output to an empty string', async () => {
+    const subagents = fakeSubagents({ output: undefined })
+    const engine = await GraphEngine.open(fakeCtx({ subagents, agent: { id: 'p' } }))
+    engine.define(agentGraph)
+    const result = await engine.run('ag', {})
+    expect(result.state.out).toBe('')
+  })
+
+  it('swallows a rejecting subagent dispose', async () => {
+    const engine = await GraphEngine.open(fakeCtx({
+      subagents: {
+        list: () => ['p1'],
+        start: async () => ({
+          result: Promise.resolve({ output: 'ok', stopReason: 'completed' }),
+          dispose: async () => {
+            throw new Error('dispose failed')
+          },
+        }),
+      },
+      agent: { id: 'p' },
+    }))
+    engine.define(agentGraph)
+    const result = await engine.run('ag', {})
+    expect(result.status).toBe('completed')
+    expect(result.state.out).toBe('ok')
+    await engine.dispose()
   })
 })

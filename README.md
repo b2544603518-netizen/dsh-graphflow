@@ -1,6 +1,6 @@
 # dsh-graphflow
 
-Declarative graph orchestration for [DeepSeek Harness](https://github.com/deepseek-ai). Register a multi-agent flow as a graph of **nodes** and **edges** over **typed state**, then run it with **conditional routing** and **resumable checkpoints**.
+Declarative graph orchestration for [DeepSeek Harness](https://github.com/deepseek-ai). Register a multi-agent flow as a graph of **nodes** and **edges** over **typed state**, then run it with **conditional routing**, **`Command`-driven control flow**, **structured agent output**, **guard/abort**, and **resumable checkpoints**.
 
 Inspired by [LangGraph](https://github.com/langchain-ai/langgraph)'s state-machine model, built natively on DSH's subagent seam and Cordis lifecycle. It is a developer-facing engine: other plugins (or future agent tools) consume `ctx.graphEngine`.
 
@@ -16,7 +16,7 @@ DSH's workflow seam runs a *model-written script* that fans out subagents, but i
 ## Install
 
 ```bash
-dsh plugin --profile web add github:<owner>/dsh-graphflow#v0.1.0
+dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.2.0
 ```
 
 The repository ships its built Host bundle, so a Git install runs no build script.
@@ -30,6 +30,7 @@ ctx.graphEngine.define(graph)
 ctx.graphEngine.run(graphId, input, options)
 ctx.graphEngine.resume(checkpointId, resumeValue?, options)
 ctx.graphEngine.getCheckpoint(checkpointId)
+ctx.graphEngine.listCheckpoints(runId)
 ```
 
 ### Graph shape
@@ -76,8 +77,69 @@ const result = await ctx.graphEngine.run('report', { topic: 'DSH plugins' })
 
 ### Node kinds
 
-- **`function`** — synchronous or async `(state, ctx) => State`. Use for routers, aggregation, and pure orchestration.
-- **`agent`** — `prompt(state, ctx) => string` delegated to a subagent provider; the final text is written to `key` and folded by that channel's reducer.
+- **`function`** — synchronous or async `(state, ctx) => State | Command`. Use for routers, aggregation, and pure orchestration. Returning a `Command` also lets the node choose the next node.
+- **`agent`** — `prompt(state, ctx) => string` delegated to a subagent provider; the final text is written to `key` and folded by that channel's reducer. Add an optional `name` (human-readable label), `outputSchema` (a zod schema the text is parsed/validated into), and `retries` (re-run on validation failure).
+
+### Command
+
+A node may return a `Command` to update state and re-route in one step:
+
+```ts
+import { Command, END } from '@dsh-external/dsh-graphflow'
+
+const graph = {
+  // ...
+  nodes: {
+    review: {
+      kind: 'function',
+      run: (state) =>
+        state.quality < 0.8
+          ? new Command({ goto: 'research' })            // loop back
+          : new Command({ update: { done: true }, goto: END }),
+    },
+  },
+}
+```
+
+`update` folds through the channel reducers; `goto` overrides the node's declared edge. Either is optional — `new Command({ update })` still follows the edge, and `new Command({ goto })` re-routes without touching state.
+
+### Structured agent output
+
+Give an agent node an `outputSchema` so its text becomes a typed state value instead of a raw string:
+
+```ts
+import { z } from 'zod'
+
+nodes: {
+  extract: {
+    kind: 'agent',
+    key: 'result',
+    prompt: s => `Extract facts from ${s.doc}`,
+    outputSchema: z.object({ facts: z.array(z.string()) }),
+    retries: 1,
+  },
+}
+```
+
+A validation failure fails the run (`RunResult.error`), or re-runs the subagent up to `retries` times with the validation error fed back.
+
+### Abort / guard
+
+`ctx.abort(value)` rejects the run with a typed reason (a "tripwire"), writing a `rejected` checkpoint:
+
+```ts
+nodes: {
+  check: {
+    kind: 'function',
+    run: (_state, ctx) => {
+      if (isInvalid(_state)) ctx.abort({ reason: 'bad-input' })
+      return {}
+    },
+  },
+}
+```
+
+The run returns `{ status: 'rejected', abortValue }`. Guards are just function nodes: an input guard before an agent node, an output guard after it.
 
 ### Checkpoints and resume
 
@@ -90,6 +152,8 @@ const again = await ctx.graphEngine.resume(checkpointId) // re-runs from the las
 
 A node may pause for a human decision with `ctx.interrupt(value)`; the run returns `status: 'interrupted'`, and `resume(checkpointId, answer)` re-runs that node with `answer` available as `ctx.resumeValue`.
 
+Every checkpoint carries a monotonic `step`; replay or debug a run's full history with `listCheckpoints(runId)`.
+
 Checkpoints are durable when the Host mounts `storageDomain` (see `src/domain.ts`); otherwise an in-memory store is used.
 
 ## Events
@@ -100,12 +164,13 @@ Every run emits observe-only events for tracing: `graphflow/start`, `graphflow/n
 
 No configuration is required. `ctx.get('subagents')`, `ctx.get('agent')`, and `ctx.get('storageDomain')` are resolved opportunistically — function-only graphs work without any of them.
 
-## Deliberate non-goals (v0.1)
+## Deliberate non-goals (v0.2)
 
-- Dynamic fan-out / map-reduce (`Send`) and subgraph nesting.
-- Time-travel UI and checkpoint branching.
+- Dynamic fan-out / map-reduce (`Send`) — planned for v0.3; DSH's `workflow` tool and subagent fork cover map-reduce today.
+- Subgraph nesting (an agent node → DSH subagent already provides composition + isolation + continuability).
+- Time-travel UI and checkpoint branching (`resume` re-runs linearly; `listCheckpoints` is read-only).
 - A model-facing graph tool (DSH already ships `workflow`).
-- Long-term memory stores and guardrails (DSH's session persistence and approval stack already cover those).
+- Long-term memory stores and span/processor observability stacks (DSH's session persistence, storage domains, and approval stack already cover those).
 
 ## Development
 

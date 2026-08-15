@@ -24,7 +24,7 @@ describe('initialState', () => {
     const withDefault: StateSchema = { items: { reducer: 'append', default: ['seed'] } }
     const first = initialState(withDefault, {})
     const second = initialState(withDefault, {})
-    first.items.push('mutated')
+    ;(first.items as string[]).push('mutated')
     expect(second.items).toEqual(['seed'])
   })
 })

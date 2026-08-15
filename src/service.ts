@@ -46,7 +46,8 @@ export interface GraphRunOptions {
 
 /**
  * Declarative multi-agent graph orchestrator: register a graph once, run it with
- * typed state and conditional routing, and resume from durable checkpoints.
+ * typed state, conditional routing, and `Command`-driven control flow, and
+ * resume from durable checkpoints.
  */
 export class GraphEngine {
   private readonly graphs = new Map<string, GraphDefinition>()
@@ -66,7 +67,11 @@ export class GraphEngine {
       const storageDomain = ctx.get('storageDomain') as StorageDomain | undefined
       if (storageDomain !== undefined) {
         const domain = await storageDomain.open(graphflowDomainSpec)
-        store = new DomainCheckpointStore(domain.table('checkpoints') as never, () => domain.close())
+        store = new DomainCheckpointStore(
+          domain.table('checkpoints') as never,
+          domain.table('runs') as never,
+          () => domain.close(),
+        )
         ownsStore = true
       } else {
         store = new MemoryCheckpointStore()
@@ -90,7 +95,10 @@ export class GraphEngine {
     const graph = this.graphs.get(graphId)
     if (graph === undefined) throw new Error(`Unknown graph '${graphId}'.`)
     const executor = new GraphExecutor(graph, this.executorDeps(options))
-    return executor.run(input, { runId: options.runId, signal: options.signal })
+    return executor.run(input, {
+      ...(options.runId === undefined ? {} : { runId: options.runId }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
   }
 
   async resume(
@@ -106,12 +114,21 @@ export class GraphEngine {
       throw new Error(`Checkpoint references graph '${checkpoint.graphId}', which is not defined.`)
     }
     const executor = new GraphExecutor(graph, this.executorDeps(options))
-    return executor.run({}, { signal: options.signal, resumeFrom: checkpoint, resumeValue })
+    return executor.run({}, {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      resumeFrom: checkpoint,
+      ...(resumeValue === undefined ? {} : { resumeValue }),
+    })
   }
 
   async getCheckpoint(id: string): Promise<Checkpoint | undefined> {
     this.throwIfDisposed()
     return this.store.load(id)
+  }
+
+  async listCheckpoints(runId: string): Promise<Checkpoint[]> {
+    this.throwIfDisposed()
+    return this.store.list(runId)
   }
 
   async dispose(): Promise<void> {
@@ -152,7 +169,7 @@ export class GraphEngine {
       if (provider === undefined) throw new Error('No subagent provider is available.')
       const run = await subagents.start(provider, {
         parent,
-        label: 'graphflow-agent-node',
+        label: request.name ?? 'graphflow-agent-node',
         prompt: request.prompt,
         ...(request.model === undefined ? {} : { model: request.model }),
         ...(nodeCtx.signal === undefined ? {} : { signal: nodeCtx.signal }),

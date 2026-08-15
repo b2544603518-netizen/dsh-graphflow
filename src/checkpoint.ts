@@ -21,6 +21,12 @@ export class MemoryCheckpointStore implements CheckpointStore {
     return this.records.get(id)
   }
 
+  async list(runId: string): Promise<Checkpoint[]> {
+    return [...this.records.values()]
+      .filter(checkpoint => checkpoint.runId === runId)
+      .sort((a, b) => a.step - b.step)
+  }
+
   async delete(id: string): Promise<boolean> {
     return this.records.delete(id)
   }

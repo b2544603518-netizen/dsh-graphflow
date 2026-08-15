@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-graphflow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Declarative graph orchestration for DeepSeek Harness: nodes, edges, typed state, conditional routing, and resumable checkpoints",
   "type": "module",
   "main": "./lib/index.js",
