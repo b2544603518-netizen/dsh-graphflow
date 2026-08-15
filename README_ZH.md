@@ -42,7 +42,7 @@ DSH 的 workflow 接缝跑的是「模型现写的脚本」去扇出子代理，
 ## 安装
 
 ```bash
-dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.2.0
+dsh plugin --profile web add github:b2544603518-netizen/dsh-graphflow#v0.2.1
 ```
 
 仓库自带已构建的 Host bundle，Git 安装时无需跑构建脚本。
@@ -197,6 +197,14 @@ const again = await ctx.graphEngine.resume(checkpointId) // 从最后一个节�
 - 时间旅行 UI 和 checkpoint 分叉（`resume` 是线性重跑；`listCheckpoints` 只读）。
 - 面向模型的图工具（DSH 已自带 `workflow`）。
 - 长期记忆存储和 span/processor 可观测栈（DSH 的会话持久化、storage domain、审批栈已覆盖）。
+
+## 已知限制与边界
+
+- **`failed` 或 `cancelled` 的 run 返回 `checkpointId: null`。** 只有成功完成的节点边界才写 checkpoint。节点抛错后，用 `listCheckpoints(runId)` 找到最后一个成功 checkpoint 再续跑。
+- **`ctx.interrupt(value)` 会丢弃该节点在调用前已写的局部状态。** interrupt 在 partial update 折叠前抛出，`resume` 时整节点重跑。需要保留的状态请放进返回值或 interrupt value 里。
+- **不加 `outputSchema` 时，agent 返回的非文本数组片段会被静默丢弃。** `coerceOutput` 只拼接 string / `{ text }` 片段，数字和对象被忽略。结果要是结构化的，请用 `outputSchema`。
+- **`outputSchema: z.string()` 对「碰巧是合法 JSON 的文本」会误判。** 结构化输出先尝试 `JSON.parse`，所以裸的 `123`、`true` 或带引号的字符串会先被解析再校验。`z.string()` 的 channel 请避免让 agent 输出可被 JSON 解析的裸值。
+- **`run → checkpoint` 索引写入非原子。** `DomainCheckpointStore` 对 `runs` 表是「先 get 再 put」。单 DSH 进程内有锁串行化；多个进程共享同一存储域时可能丢索引。
 
 ## 开发
 
